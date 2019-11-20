@@ -121,6 +121,34 @@ static void can_speed_print_verbose(mcp2515_can_speed_t speed)
   }
 }
 
+static void mcp2515_handler_task(void *pvParameters)
+{
+  printf("Initialize MCP2515...");
+  mcp2515_device_t dev = {
+    .spi_bus_no = SPI_BUS,
+    .cs_pin   = CS_PIN,
+  };
+
+  mcp2515_setup_device(&dev);
+  if (mcp2515_init(CAN_500KBPS)) {
+    printf("MCP2515 init failed, IC unaccessible.\n");
+    goto error;
+  }
+
+  if (mcp2515_request_operation_mode(LISTEN_ONLY_MODE) < 0) {
+    printf("Unable to set MCP2515 to desired mode: %d.\n", LISTEN_ONLY_MODE);
+    goto error;
+  }
+  printf("done\n");
+
+
+  gpio_set_interrupt(INT_PIN, GPIO_INTTYPE_EDGE_NEG, gpio_int_handler);
+error:
+  while(1) {
+    vTaskDelay(SECOND);
+  }
+}
+
 /*
 static void can_speed_brutforce_task(void *pvParameters)
 {
@@ -190,17 +218,13 @@ mcp2515_error:
 static void udp_server(void *pvParameters)
 {
   int err = ERR_OK;
-  printf("%s: Started can message dumper task\n", __FUNCTION__);
+  printf("%s: UDP server task is about to start...\n", __FUNCTION__);
 
-  while(!connected) {
-    vTaskDelay(SECOND);
-    printf("WIFI is not connected yet\n");
-  }
-  //ip_addr_t dhcp_ip;
-  //IP4_ADDR(&dhcp_ip, 172,16,5,2);
-  //dhcpserver_start(&dhcp_ip, 4);
+  ip_addr_t dhcp_ip;
+  IP4_ADDR(&dhcp_ip, 172,16,5,2);
+  dhcpserver_start(&dhcp_ip, 4);
 
-  struct netconn *conn = netconn_new(NETCONN_TCP);
+  struct netconn *conn = netconn_new(NETCONN_UDP);
   if (!conn) {
       printf("Error while creating struct netconn\n");
       goto error;
@@ -226,21 +250,31 @@ static void udp_server(void *pvParameters)
     printf("Got client!\n");
     ip_addr_t client_addr;
     uint16_t port_ignore;
-    netconn_peer(client, &client_addr, &port_ignore);
+    if (ERR_OK != netconn_peer(client, &client_addr, &port_ignore)) {
+      printf("Error while netconn_peer()\n");
+      netconn_close(client);
+      netconn_delete(client);
+      continue;
+    }
+
     while (1) {
-      printf("%d %d %d %d\n", stats.pkts, stats.read_error, stats.errif, stats.merf);
-      printf("%d %d %d %d %d %d %d %d\n", stats.rx1ovr, stats.rx0ovr, stats.txbo, stats.txep, stats.rxep, stats.txwar, stats.rxwar, stats.ewarn);
       while(uxQueueMessagesWaiting(xQueue_events)) {
 	printf("Start sending frames to client\n");
 	can_frame_t frame;
 	if (xQueueReceive(xQueue_events, &frame, SECOND) == pdTRUE) {
-	  netconn_write(client, &frame, sizeof(frame), NETCONN_COPY);
+	  if (ERR_OK != netconn_write(client, &frame, sizeof(frame),
+		NETCONN_COPY)) {
+	    printf("Error while sending data to peer\n");
+	    break;
+	  }
 	} else {
 	  printf("No data yet\n");
 	}
 	vTaskDelay(SECOND/10);
       }
     }
+    netconn_close(client);
+    netconn_delete(client);
   }
 
 error:
@@ -249,6 +283,15 @@ error:
   while(1) {
     printf("%s: error_loop\n", __FUNCTION__);
     vTaskDelay(SECOND);
+  }
+}
+
+static void heartbeat_task(void *pvParameters)
+{
+  while(1) {
+      printf("%d %d %d %d\n", stats.pkts, stats.read_error, stats.errif, stats.merf);
+      printf("%d %d %d %d %d %d %d %d\n", stats.rx1ovr, stats.rx0ovr, stats.txbo, stats.txep, stats.rxep, stats.txwar, stats.rxwar, stats.ewarn);
+      vTaskDelay(SECOND*1);
   }
 }
 
@@ -270,7 +313,6 @@ void gpio_int_handler(uint8_t gpio_num)
   eflg = mcp2515_read_eflg();
 
   if (can_irq_flags & (CANINTF_RX0IF | CANINTF_RX1IF)){
-
     err = mcp2515_read_can_frame(&frm);
     if (err) {
       stats.read_error ++;
@@ -312,120 +354,65 @@ bailout:
   return;
 }
 
-
-static void wifi_ap_task(void *pvParameters)
-{
-  uint8_t status = 0;
-  uint8_t retries = 30;
-#if 0
-  struct sdk_softap_config ap_config = {
-    .ssid = AP_SSID,
-    .ssid_hidden = 0,
-    .channel = 3,
-    .ssid_len = strlen(AP_SSID),
-    .authmode = AUTH_WPA_WPA2_PSK,
-    .password = AP_PSK,
-    .max_connection = 3,
-    .beacon_interval = 100,
-  };
-
-  printf("Setting up SOFTAP:...");
-  sdk_wifi_set_opmode(SOFTAP_MODE);
-
-  struct ip_info ap_ip;
-  IP4_ADDR(&ap_ip.ip, 172, 16, 5, 1);
-  IP4_ADDR(&ap_ip.gw, 0, 0, 0, 0);
-  IP4_ADDR(&ap_ip.netmask, 255, 255, 0, 0);
-  sdk_wifi_set_ip_info(1, &ap_ip);
-
-  sdk_wifi_softap_set_config(&ap_config);
-  sdk_wifi_status_led_install(2, PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
-  printf("done\n");
-#endif
-
-  struct sdk_station_config config = {
-    .ssid = WIFI_SSID,
-    .password = WIFI_PASS,
-  };
-
-  printf("Current mode: %d\n", sdk_wifi_get_opmode());
-  printf("Configuring WiFI as STATION...");
-  sdk_wifi_set_opmode(STATION_MODE);
-  sdk_wifi_station_set_config(&config);
-  sdk_wifi_station_connect();
-
-  while(1) {
-    while (status != STATION_GOT_IP && retries) {
-      status = sdk_wifi_station_get_connect_status();
-      printf("status: %d\n", status);
-      if(status == STATION_WRONG_PASSWORD) {
-	printf("WiFi: wrong password\n");
-	break;
-      } else if(status == STATION_NO_AP_FOUND) {
-	printf("WiFi: AP not found\n");
-	break;
-      } else if(status == STATION_CONNECT_FAIL) {
-	printf("WiFi: connection failed\n");
-	break;
-      }
-      vTaskDelay(SECOND);
-      retries--;
-    }
-    if (status == STATION_GOT_IP) {
-      printf("WiFi: connected\n");
-      vTaskDelay(SECOND*10);
-      connected = 1;
-    }
-  }
-}
-
 void user_init(void)
 {
   // Setup HW
   uart_set_baud(0, 115200);
   vTaskDelay(SECOND*2);
-  printf("SDK version:%s, free_heap: %u\n", sdk_system_get_sdk_version(), xPortGetFreeHeapSize());
+  printf("SDK version:%s, free_heap: %u\n",
+         sdk_system_get_sdk_version(), xPortGetFreeHeapSize());
+  
+  printf("Initialize SPI...");
+  spi_init(1, SPI_MODE0, SPI_FREQ_DIV_125K, 1, SPI_LITTLE_ENDIAN, true);
+  gpio_enable(CS_PIN, GPIO_OUTPUT);
+  gpio_enable(INT_PIN, GPIO_INPUT);
+  printf("done\n");
+  
+  printf("Starting heartbeat task...");
+  xTaskCreate(heartbeat_task, "heart beat", 256, NULL, 2, NULL);
+  printf("done\n");
+  
+  vSemaphoreCreateBinary(inTransaction_semaphore);
 
-  xTaskCreate(wifi_ap_task, "WiFi task", 512, NULL, 2, NULL);
+  printf("Setting up SOFTAP:...");
+  struct sdk_softap_config ap_config = {
+    .ssid = WIFI_SSID,
+    .ssid_hidden = 0,
+    .channel = 3,
+    .ssid_len = strlen(WIFI_SSID),
+    .authmode = AUTH_WPA_WPA2_PSK,
+    .password = WIFI_PASS,
+    .max_connection = 3,
+    .beacon_interval = 100,
+  };
+  
+  struct ip_info ap_ip;
+  IP4_ADDR(&ap_ip.ip, 172, 16, 5, 1);
+  IP4_ADDR(&ap_ip.gw, 0, 0, 0, 0);
+  IP4_ADDR(&ap_ip.netmask, 255, 255, 0, 0);
+
+  sdk_wifi_set_opmode(SOFTAP_MODE);
+  sdk_wifi_set_ip_info(1, &ap_ip);
+  sdk_wifi_softap_set_config(&ap_config);
+  sdk_wifi_status_led_install(2, PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
+
+  printf("done\n");
+  
+  printf("Starting UDP server task...");
+  xTaskCreate(udp_server, "udp server", 512, NULL, 2, NULL);
+  printf("done\n");
+
 
   printf("Creating xQueue for receiving can messages...");
   xQueue_events = xQueueCreate(20, sizeof(can_frame_t)); // queue for 20 frames
   printf("done\n");
 
-  vSemaphoreCreateBinary(inTransaction_semaphore);
 
-  printf("Initialize SPI...");
-  spi_init(1, SPI_MODE0, SPI_FREQ_DIV_125K, 1, SPI_LITTLE_ENDIAN, true);
-  gpio_enable(CS_PIN, GPIO_OUTPUT);
-  gpio_enable(INT_PIN, GPIO_INPUT);
 
-  printf("done\n");
-
-  printf("Initialize MCP2515...");
-  mcp2515_device_t dev = {
-    .spi_bus_no = SPI_BUS,
-    .cs_pin   = CS_PIN,
-  };
-
-  mcp2515_setup_device(&dev);
-  if (mcp2515_init(CAN_500KBPS)) {
-    printf("MCP2515 init failed, IC unaccessible.\n");
-    goto error;
-  }
-
-  if (mcp2515_request_operation_mode(LISTEN_ONLY_MODE) < 0) {
-    printf("Unable to set MCP2515 to desired mode: %d.\n", LISTEN_ONLY_MODE);
-    goto error;
-  }
-  printf("done\n");
-
-  xTaskCreate(udp_server, "udp server", 512, NULL, 2, NULL);
   //xTaskCreate(can_speed_brutforce_task, "brutforce_task", 512, NULL, 2, NULL);
+  xTaskCreate(mcp2515_handler_task, "mcp2515 handler task", 512, NULL, 2, NULL);
 
-  gpio_set_interrupt(INT_PIN, GPIO_INTTYPE_EDGE_NEG, gpio_int_handler);
-  
   return;
-
 error:
   while(1) {
     printf("%s: some error occured :(\n", __FUNCTION__);
