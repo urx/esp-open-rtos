@@ -24,6 +24,9 @@ uint8_t mcp2515_read_reg(uint8_t const reg);
 uint8_t need_to_change_speed = 0;
 uint8_t connected = 0;
 
+void gpio_int_handler(uint8_t gpio_num);
+
+
 typedef struct mcp2515_stats {
   uint32_t merf;
   uint32_t errif;
@@ -141,7 +144,6 @@ static void mcp2515_handler_task(void *pvParameters)
   }
   printf("done\n");
 
-
   gpio_set_interrupt(INT_PIN, GPIO_INTTYPE_EDGE_NEG, gpio_int_handler);
 error:
   while(1) {
@@ -224,13 +226,13 @@ static void udp_server(void *pvParameters)
   IP4_ADDR(&dhcp_ip, 172,16,5,2);
   dhcpserver_start(&dhcp_ip, 4);
 
-  struct netconn *conn = netconn_new(NETCONN_UDP);
+  struct netconn *conn = netconn_new(NETCONN_TCP);
   if (!conn) {
       printf("Error while creating struct netconn\n");
       goto error;
   }
 
-  err = netconn_bind(conn, IP_ANY_TYPE, 6666);
+  err = netconn_bind(conn, IP4_ADDR_ANY, 6666);
   if (err != ERR_OK) {
     printf("Unable to bind, no data will be sent (%s)\n", lwip_strerr(err));
     goto error;
@@ -257,24 +259,30 @@ static void udp_server(void *pvParameters)
       continue;
     }
 
-    while (1) {
-      while(uxQueueMessagesWaiting(xQueue_events)) {
-	printf("Start sending frames to client\n");
-	can_frame_t frame;
-	if (xQueueReceive(xQueue_events, &frame, SECOND) == pdTRUE) {
-	  if (ERR_OK != netconn_write(client, &frame, sizeof(frame),
-		NETCONN_COPY)) {
-	    printf("Error while sending data to peer\n");
-	    break;
+    while (err == ERR_OK) {
+      while(1) {
+	if(uxQueueMessagesWaiting(xQueue_events)) {
+	  printf("Start sending frames to client\n");
+	  can_frame_t frame;
+	  if (xQueueReceive(xQueue_events, &frame, SECOND) == pdTRUE) {
+	    if (ERR_OK != (err = netconn_write(client, &frame, sizeof(frame),
+		    NETCONN_COPY))) {
+	      printf("Error while sending data to peer\n");
+	      break;
+	    }
+	  } else {
+	    printf("No data yet\n");
 	  }
+	  vTaskDelay(SECOND/10);
 	} else {
-	  printf("No data yet\n");
+	  printf("xQueue is empty\n");
+	  vTaskDelay(SECOND);
 	}
-	vTaskDelay(SECOND/10);
+	taskYIELD();
       }
+      netconn_close(client);
+      netconn_delete(client);
     }
-    netconn_close(client);
-    netconn_delete(client);
   }
 
 error:
