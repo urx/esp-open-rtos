@@ -133,7 +133,7 @@ static void mcp2515_handler_task(void *pvParameters)
   };
 
   mcp2515_setup_device(&dev);
-  if (mcp2515_init(CAN_500KBPS)) {
+  if (mcp2515_init(CAN_125KBPS)) {
     printf("MCP2515 init failed, IC unaccessible.\n");
     goto error;
   }
@@ -309,13 +309,11 @@ void gpio_int_handler(uint8_t gpio_num)
   uint8_t err = 0;
   uint8_t can_irq_flags = 0;
   uint8_t eflg = 0;
-  printf("%s\n", __FUNCTION__);
   //if (xSemaphoreTakeFromISR(inTransaction_semaphore, NULL) != pdTRUE) {
   //    /* we are got intterrupt in the middle of some configuration process. drop it */
   //    return;
  // }
 
-  printf("%s 2\n", __FUNCTION__);
   need_to_change_speed = 1;
   can_irq_flags = mcp2515_read_can_irq_flags();
   eflg = mcp2515_read_eflg();
@@ -371,7 +369,7 @@ void user_init(void)
          sdk_system_get_sdk_version(), xPortGetFreeHeapSize());
   
   printf("Initialize SPI...");
-  spi_init(1, SPI_MODE0, SPI_FREQ_DIV_125K, 1, SPI_LITTLE_ENDIAN, true);
+  spi_init(1, SPI_MODE0, SPI_FREQ_DIV_1M, 1, SPI_LITTLE_ENDIAN, true);
   gpio_enable(CS_PIN, GPIO_OUTPUT);
   gpio_enable(INT_PIN, GPIO_INPUT);
   printf("done\n");
